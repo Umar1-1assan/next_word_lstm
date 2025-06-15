@@ -1,86 +1,68 @@
 import re
+import pandas as pd
 import numpy as np
 import pickle
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
 
+def load_csv(csv_path: str) -> pd.DataFrame:
+    """Load raw CSV and filter dialogue lines"""
+    df = pd.read_csv(csv_path)
+    df = df[df['PlayerLine'].notna()]
+    df['Player'] = df['Player'].fillna('')
+    mask = df['Player'].str.contains(r'^(ACT|SCENE)', regex=True)
+    df = df[~mask]
+    return df
+
+
 def clean_text(txt: str) -> str:
-    """
-    Clean raw Shakespeare text:
-      - Remove stage directions and bracketed text
-      - Strip ACT/SCENE headers
-      - Keep alphanumeric and basic punctuation
-      - Normalize to lowercase and collapse whitespace
-    """
+    """Remove bracketed directions, unwanted chars, lowercase and collapse whitespace"""
     txt = re.sub(r"\[.*?\]", "", txt)
     txt = re.sub(r"\(.*?\)", "", txt)
-    txt = re.sub(r"^(ACT|SCENE) [IVXLC]+.*$", "", txt, flags=re.MULTILINE)
-    txt = re.sub(r"[^a-zA-Z0-9\s\.\,\;\'\-]", "", txt)
+    txt = re.sub(r"[^a-zA-Z0-9\s\.,;'-]", "", txt)
     txt = txt.lower()
     txt = re.sub(r"\s+", " ", txt).strip()
     return txt
 
 
-def load_and_clean(input_path: str) -> str:
-    with open(input_path, 'r', encoding='utf-8') as f:
-        raw = f.read()
-    return clean_text(raw)
+def preprocess_csv(csv_path: str,
+                   seq_len: int = 20,
+                   out_dir: str = '../data/processed') -> tuple[np.ndarray, np.ndarray, Tokenizer]:
+    # Load and clean CSV
+    df = load_csv(csv_path)
+    combined = ' '.join(df['PlayerLine'].astype(str).tolist())
+    cleaned = clean_text(combined)
 
-
-def tokenize_and_save(cleaned_text: str,
-                      tokenizer_path: str,
-                      num_words: int = None) -> Tokenizer:
-    tokenizer = Tokenizer(num_words=num_words)
-    # we can split into sentences by punctuation
-    sentences = cleaned_text.split('.')
-    tokenizer.fit_on_texts(sentences)
-    with open(tokenizer_path, 'wb') as f:
+    # Tokenization
+    nltk_tokens = cleaned.split()  # word-level split for clarity
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts([cleaned])
+    with open(f"{out_dir}/tokenizer.pkl", 'wb') as f:
         pickle.dump(tokenizer, f)
-    return tokenizer
 
+    # Convert to integer list
+    token_list = tokenizer.texts_to_sequences([cleaned])[0]
 
-def generate_sequences(tokenizer: Tokenizer,
-                       cleaned_text: str,
-                       max_len: int = None) -> (np.ndarray, np.ndarray):
-    sentences = cleaned_text.split('.')
+    # Sequence generation
     sequences = []
-    for sent in sentences:
-        token_list = tokenizer.texts_to_sequences([sent])[0]
-        for i in range(1, len(token_list)):
-            seq = token_list[:i+1]
-            sequences.append(seq)
-    if max_len is None:
-        max_len = max(len(seq) for seq in sequences)
-    sequences_padded = pad_sequences(sequences, maxlen=max_len, padding='pre')
-    sequences_padded = np.array(sequences_padded)
-    X, y = sequences_padded[:, :-1], sequences_padded[:, -1]
-    return X, y, max_len
+    for i in range(seq_len, len(token_list)):
+        seq = token_list[i-seq_len:i+1]
+        sequences.append(seq)
+    sequences = pad_sequences(sequences, maxlen=seq_len+1, padding='pre')
+    X, y = sequences[:, :-1], sequences[:, -1]
 
-
-def save_numpy_arrays(X: np.ndarray,
-                      y: np.ndarray,
-                      x_path: str,
-                      y_path: str) -> None:
-    np.save(x_path, X)
-    np.save(y_path, y)
-
+    # Save arrays
+    np.save(f"{out_dir}/data_X.npy", X)
+    np.save(f"{out_dir}/data_y.npy", y)
+    return X, y, tokenizer
 
 if __name__ == '__main__':
     import argparse
-
-    parser = argparse.ArgumentParser(description='Preprocess Shakespeare text')
-    parser.add_argument('--input', default='../data/raw/shakespeare.txt')
+    parser = argparse.ArgumentParser(description='Preprocess Shakespeare CSV with fixed sequence length')
+    parser.add_argument('--csv_path', default='../data/raw/shakespeare.csv')
+    parser.add_argument('--seq_len', type=int, default=20)
     parser.add_argument('--out_dir', default='../data/processed')
-    parser.add_argument('--num_words', type=int, default=None)
     args = parser.parse_args()
-
-    clean = load_and_clean(args.input)
-    tokenizer = tokenize_and_save(clean,
-                                  f"{args.out_dir}/tokenizer.pkl",
-                                  num_words=args.num_words)
-    X, y, seq_len = generate_sequences(tokenizer, clean)
-    save_numpy_arrays(X, y,
-                      f"{args.out_dir}/data_X.npy",
-                      f"{args.out_dir}/data_y.npy")
-    print(f"Saved sequences (num={X.shape[0]}, seq_len={seq_len}) and tokenizer.")
+    X, y, tokenizer = preprocess_csv(args.csv_path, args.seq_len, args.out_dir)
+    print(f"Preprocessed: X shape {X.shape}, y shape {y.shape}")
